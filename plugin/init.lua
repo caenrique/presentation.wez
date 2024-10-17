@@ -1,187 +1,151 @@
+local wezterm = require("wezterm")
+
 local M = {}
+local State = {}
 
----@class ConfigModeKeybind
----@field key? string
----@field mods? string
+---@class WindowState
+---@field font_weight string
+---@field font_size number
+---@field is_fullscreen boolean
 
----@class ConfigMode
----@field enabled? boolean
----@field keybind? ConfigModeKeybind
----@field font_weight? string
----@field font_size_multiplier? number
-
----@class Config
----@field presentation? ConfigMode
----@field presentation_full? ConfigMode
----@field font_weight? string
----@field font_size_multiplier? number
-
----@type Config
-local default_config = {
-    presentation = {
-        enabled = true,
-        keybind = {
-            key = "p",
-            mods = "CTRL|ALT",
-        },
-    },
-    presentation_full = {
-        enabled = true,
-        keybind = {
-            key = "p",
-            mods = "CTRL|ALT|SHIFT",
-        },
-    },
+---@class State
+---@field active boolean
+---@field prev_state? WindowState
+State.default = {
+    active = false,
+    prev_state = nil,
 }
 
----@param t1 table
----@param t2 table
----@return table t
-local function deep_merge_table(t1, t2)
-    for k, v in pairs(t2) do
-        if type(v) == "table" then
-            if type(t1[k] or false) == "table" then
-                deep_merge_table(t1[k] or {}, t2[k] or {})
+if not wezterm.GLOBAL.presentation_mode then
+    wezterm.GLOBAL.presentation_mode = State.default
+    wezterm.log_info("state was empty so setting default")
+end
+
+---@param win table
+State.record_state = function(win)
+    local config = win:effective_config()
+    wezterm.GLOBAL.presentation_mode.prev_state = {
+        font_weight = config.font.font[1].weight,
+        font_size = config.font_size,
+        is_fullscreen = win:get_dimensions().is_full_screen,
+    }
+end
+
+---@return WindowState
+State.get_prev_state = function() return wezterm.GLOBAL.presentation_mode.prev_state end
+
+---@param value boolean
+State.set_active = function(value) wezterm.GLOBAL.presentation_mode.active = value end
+
+---@return boolean
+State.get_active = function() return wezterm.GLOBAL.presentation_mode.active end
+
+---@param ... table
+---@return table result
+local function deep_merge_table(...)
+    local tables_to_merge = { ... }
+    assert(#tables_to_merge > 1, "There should be at least two tables to merge them")
+
+    local result = {}
+    for k, t in ipairs(tables_to_merge) do
+        assert(type(t) == "table", string.format("Expected a table as function parameter %d", k))
+        for key, value in pairs(t) do
+            if type(value) == "table" then
+                result[key] = deep_merge_table(result[key] or {}, value or {})
             else
-                t1[k] = v
+                result[key] = value
             end
-        else
-            t1[k] = v
         end
     end
 
-    return t1
+    return result
 end
 
-local presentation_active = false
-local presentation_prev_font_weight
-local presentation_prev_font_size
-local presentation_fullscreen = false
-
----@class PresentationOpts
----@field fullscreen? boolean
+---@class PresentationModeOpts
 ---@field font_weight? string
 ---@field font_size_multiplier? number
+---@field fullscreen? boolean
 
----@type PresentationOpts
-local default_toggle = {
-    fullscreen = false,
+---@type PresentationModeOpts
+local default_opts = {
     font_weight = "DemiBold",
-    font_size_multiplier = 2.0,
+    font_size_multiplier = 1.6,
+    fullscreen = false,
 }
 
 ---@param win table
----@param opts? PresentationOpts
----@param record_attributes? boolean
----@return unknown overrides
-local function enable(win, opts, record_attributes)
-    ---@type PresentationOpts
-    opts = opts and deep_merge_table(default_toggle, opts) or default_toggle
+---@param opts PresentationModeOpts
+local function enable(win, opts)
+    wezterm.log_info("Enable called with opts:")
+    wezterm.log_info(opts)
 
-    local config = win:effective_config()
     local overrides = win:get_config_overrides() or {}
+    local config = win:effective_config()
+    overrides.font = overrides.font or config.font
 
-    if not overrides.font then overrides.font = {} end
-    if not overrides.font.font then overrides.font.font = {} end
-    if not overrides.font.font[1] then overrides.font.font[1] = config.font.font[1] end
+    wezterm.log_info(overrides)
 
-    if record_attributes then
-        presentation_prev_font_weight = overrides.font.font[1].weight
-        presentation_prev_font_size = config.font_size
-        presentation_fullscreen = not win:get_dimensions().is_full_screen
-    end
+    State.record_state(win)
+
+    if opts.fullscreen and not win:get_dimensions().is_full_screen then win:toggle_fullscreen() end
 
     overrides.font.font[1].weight = opts.font_weight
-    overrides.font_size = presentation_prev_font_size * opts.font_size_multiplier
+    overrides.font_size = State.get_prev_state().font_size * opts.font_size_multiplier
 
-    if opts.fullscreen ~= win:get_dimensions().is_full_screen then
-        win:toggle_fullscreen()
-        presentation_fullscreen = opts.fullscreen
-        if not opts.fullscreen then win:maximize() end
+    if pcall(function() win:set_config_overrides(overrides) end) then
+        State.set_active(true)
     else
-        if opts.fullscreen and presentation_fullscreen then
-            win:toggle_fullscreen()
-        else
-            if presentation_fullscreen then win:maximize() end
-        end
+        wezterm.log_error("Something went wrong when activating presentation mode")
     end
-
-    presentation_active = true
-
-    require("wezterm").emit("xarvex.presentation.activate", win)
-
-    return overrides
 end
 
 ---@param win table
----@param opts? PresentationOpts
-local function toggle(win, opts)
-    ---@type PresentationOpts
-    opts = opts and deep_merge_table(default_toggle, opts) or default_toggle
+local function disable(win)
+    if not State.get_active() then
+        -- diable can only be called when State.active == true
+        wezterm.log_warn("function disable called when State.active was false")
+        return
+    end
 
     local overrides = win:get_config_overrides() or {}
 
-    if presentation_active then
-        if opts.fullscreen ~= win:get_dimensions().is_full_screen then
-            deep_merge_table(overrides, enable(win, opts, false))
-        else
-            overrides.font.font[1].weight = presentation_prev_font_weight
-            overrides.font_size = presentation_prev_font_size
+    overrides.font.font[1].weight = State.get_prev_state().font_weight
+    overrides.font_size = State.get_prev_state().font_size
 
-            if opts.fullscreen and presentation_fullscreen then win:toggle_fullscreen() end
-            win:restore()
-            presentation_active = false
+    if win:get_dimensions().is_full_screen ~= State.get_prev_state().is_fullscreen then
+        wezterm.log_info("window is_full_screen: " .. tostring(win:get_dimensions().is_full_screen))
+        wezterm.log_info("prev state is full screen: " .. tostring(State.get_prev_state().is_fullscreen))
+        win:toggle_fullscreen()
+    end
 
-            require("wezterm").emit("xarvex.presentation.deactivate", win)
-        end
+    if pcall(function() win:set_config_overrides(overrides) end) then
+        State.set_active(false)
     else
-        deep_merge_table(overrides, enable(win, opts, true))
+        wezterm.log_error("Something went wrong when deactivating presentation mode")
     end
-
-    win:set_config_overrides(overrides)
 end
 
----@param config unknown
----@param opts? Config
----@return unknown config
-function M.apply_to_config(config, opts)
-    if not config.keys then config.keys = {} end
+---@param opts? PresentationModeOpts
+M.toggle = function(opts)
+    wezterm.log_info("before applying defaults: ")
+    wezterm.log_info(opts)
 
-    ---@type Config
-    opts = opts and deep_merge_table(default_config, opts) or default_config
+    ---@type PresentationModeOpts
+    opts = opts and deep_merge_table(default_opts, opts) or default_opts
 
-    if opts.presentation.enabled then
-        table.insert(config.keys, {
-            key = opts.presentation.keybind.key,
-            mods = opts.presentation.keybind.mods,
-            action = require("wezterm").action_callback(
-                function(win)
-                    toggle(win, {
-                        fullscreen = false,
-                        font_weight = opts.presentation.font_weight or opts.font_weight,
-                        font_size_multiplier = opts.presentation.font_size_multiplier or opts.font_size_multiplier,
-                    })
-                end
-            ),
-        })
-    end
-    if opts.presentation_full.enabled then
-        table.insert(config.keys, {
-            key = opts.presentation_full.keybind.key,
-            mods = opts.presentation_full.keybind.mods,
-            action = require("wezterm").action_callback(
-                function(win)
-                    toggle(win, {
-                        fullscreen = true,
-                        font_weight = opts.presentation_full.font_weight or opts.font_weight,
-                        font_size_multiplier = opts.presentation_full.font_size_multiplier or opts.font_size_multiplier,
-                    })
-                end
-            ),
-        })
-    end
+    wezterm.log_info("after applying defaults: ")
+    wezterm.log_info(opts)
 
-    return config
+    return wezterm.action_callback(function(win, _)
+        wezterm.log_info("this callback was created with opts: { fullscreen = " .. tostring(opts.fullscreen) .. " }")
+        if State.get_active() then
+            disable(win)
+        else
+            enable(win, opts)
+        end
+    end)
 end
+
+M.apply_to_config = function(config) wezterm.log_info("loaded presentation mode plugin") end
 
 return M
