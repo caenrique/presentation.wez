@@ -76,23 +76,17 @@ local default_opts = {
 ---@param win table
 ---@param opts PresentationModeOpts
 local function enable(win, opts)
-    wezterm.log_info("Enable called with opts:")
-    wezterm.log_info(opts)
-
     local overrides = win:get_config_overrides() or {}
     local config = win:effective_config()
     overrides.font = overrides.font or config.font
 
-    wezterm.log_info(overrides)
-
     State.record_state(win)
-
-    if opts.fullscreen and not win:get_dimensions().is_full_screen then win:toggle_fullscreen() end
 
     overrides.font.font[1].weight = opts.font_weight
     overrides.font_size = State.get_prev_state().font_size * opts.font_size_multiplier
 
     if pcall(function() win:set_config_overrides(overrides) end) then
+        if opts.fullscreen and not win:get_dimensions().is_full_screen then win:toggle_fullscreen() end
         State.set_active(true)
     else
         wezterm.log_error("Something went wrong when activating presentation mode")
@@ -112,13 +106,8 @@ local function disable(win)
     overrides.font.font[1].weight = State.get_prev_state().font_weight
     overrides.font_size = State.get_prev_state().font_size
 
-    if win:get_dimensions().is_full_screen ~= State.get_prev_state().is_fullscreen then
-        wezterm.log_info("window is_full_screen: " .. tostring(win:get_dimensions().is_full_screen))
-        wezterm.log_info("prev state is full screen: " .. tostring(State.get_prev_state().is_fullscreen))
-        win:toggle_fullscreen()
-    end
-
     if pcall(function() win:set_config_overrides(overrides) end) then
+        if win:get_dimensions().is_full_screen ~= State.get_prev_state().is_fullscreen then win:toggle_fullscreen() end
         State.set_active(false)
     else
         wezterm.log_error("Something went wrong when deactivating presentation mode")
@@ -146,6 +135,6 @@ M.toggle = function(opts)
     end)
 end
 
-M.apply_to_config = function(config) wezterm.log_info("loaded presentation mode plugin") end
+M.apply_to_config = function(config) end
 
 return M
